@@ -1,0 +1,137 @@
+# Tracking plan. The single source of truth for every event this product sends.
+# Code implements it through the typed tracking module, and analytics tools mirror it.
+# Format: events and properties as below; types follow JSON Schema names so the plan can be
+# synced into Segment Protocols, RudderStack, Mixpanel Lexicon or Amplitude Data.
+# status: live (sent today), planned (typed in the module, not yet called; say what's missing),
+# deprecated (legacy, still sent until its consumers move; name its replacement).
+
+questions:
+  - id: activation
+    text: What percentage of new accounts reach the setup moment within 7 days?
+    stated: true # the user asked for it; false means the agent inferred it
+  - id: upgrade-intent
+    text: How many upgrade attempts start in the app but never complete?
+    stated: false
+
+destinations: [PostHog EU (eu.i.posthog.com)] # everywhere these events end up, CDP fan-out included
+
+accounts:
+  # B2B only. Each group type the business sells to or measures, set through the group call.
+  - groupType: company # the org that holds the subscription
+    idProperty: accountId
+    traits: # live on the account, updated when they change; never copied onto each event
+      planTier:
+        type: string
+        enum: [free, pro, enterprise]
+        description: Current plan, updated by the billing webhook.
+      countSeats:
+        type: integer
+        description: Paid seats, updated whenever seats change.
+      createdAt:
+        type: string
+        format: date-time
+        description: When the account was created.
+
+sources:
+  # Tools without a source concept (PostHog, Mixpanel, GA4, Heap) get the sourceContext group on
+  # every event, with eventSource set to the sending source's id. Tools with native sources
+  # (Segment, RudderStack, Amplitude Data) drop the group and assign sources there instead.
+  - id: web
+    description: The signed-in web app (React, browser).
+  - id: backend
+    description: The API server (Node). Sends every event automations depend on.
+
+propertyGroups:
+  sourceContext:
+    description: Which runtime sent the event. On every event, for tools without native sources.
+    properties:
+      eventSource:
+        type: string
+        const: <source id> # web or backend, fixed per source in the typed module
+        required: true
+        description: The source that sent this event, from the sources list above.
+  accountContext:
+    description: >-
+      The account the event happened under: the active workspace on the client, the request's
+      account on the server. Attached by the typed module to every event, alongside the group call.
+    properties:
+      accountId:
+        type: string
+        required: true
+        description: Internal ID of the account (org). Never the account name.
+
+events:
+  - name: Account Is Created
+    status: live
+    description: >-
+      A new account (org) record is saved. Fires once per account, from the signup handler after
+      the database write commits; retries of the request do not fire it again. Drives the
+      onboarding email sequence.
+    sources: [backend]
+    firesFrom: api/routes/signup.ts (createAccount)
+    questions: [activation]
+    propertyGroups: [sourceContext, accountContext]
+    properties:
+      signupMethod:
+        type: string
+        enum: [email, google, github]
+        required: true
+        description: How the user authenticated at signup.
+
+  - name: Upgrade CTA Is Clicked
+    status: live
+    description: >-
+      The user clicks any upgrade call to action. Fires on every click, before navigation.
+      Pair with Account Is Upgraded (backend) to measure drop-off between intent and outcome.
+    sources: [web]
+    firesFrom: web/components/UpgradeCta.tsx
+    questions: [upgrade-intent]
+    propertyGroups: [sourceContext, accountContext]
+    properties:
+      ctaLocation:
+        type: string
+        enum: [navbar, usage-limit-banner, settings-billing]
+        required: true
+        description: Which upgrade CTA was clicked. New CTAs add a value here.
+
+  - name: Projects Are Created
+    status: live
+    description: >-
+      One or more projects are created in a single action (manual create or import). Fires once
+      per action, not once per project.
+    sources: [backend]
+    firesFrom: api/services/projects.ts (createProjects)
+    questions: [activation]
+    propertyGroups: [sourceContext, accountContext]
+    properties:
+      countProjects:
+        type: integer
+        minimum: 1
+        required: true
+        description: Number of projects created by this action.
+      creationMethod:
+        type: string
+        enum: [manual, import]
+        required: true
+        description: Whether the projects were created by hand or by an import.
+
+  - name: Account Is Upgraded
+    status: planned # billing runs in a separate service; the typed function exists, nothing calls it
+    description: >-
+      An account moves to a paid plan. Fires once per upgrade, from the billing webhook after the
+      subscription is confirmed. The outcome that pairs with Upgrade CTA Is Clicked.
+    sources: [backend]
+    firesFrom: NOT IMPLEMENTED (billing service webhook)
+    questions: [upgrade-intent]
+    propertyGroups: [sourceContext, accountContext]
+
+  - name: account_created
+    status: deprecated
+    replacedBy: Account Is Created
+    consumers: [Onboarding funnel dashboard]
+    description: >-
+      Legacy signup event, still sent in parallel until the dashboard moves to Account Is Created.
+    sources: [backend]
+    firesFrom: api/routes/signup.ts (createAccount)
+    questions: [activation]
+    propertyGroups: [sourceContext]
